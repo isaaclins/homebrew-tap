@@ -1,0 +1,24 @@
+name: Check
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  cask:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Uninstall steps against a fake system
+        run: bash tests/freesnitch_uninstall_test.sh
+
+      - name: brew style and audit
+        run: |
+          brew tap isaaclins/tap "$GITHUB_WORKSPACE"
+          if brew commands | grep -qx trust; then brew trust isaaclins/tap; fi
+          brew style --cask isaaclins/tap/freesnitch
+          brew audit --cask --online isaaclins/tap/freesnitch
