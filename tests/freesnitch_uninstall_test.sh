@@ -17,11 +17,14 @@
 #   - it refuses while the helper still runs from the bundle, when the anchor
 #     is a symlink, and when pfctl fails,
 #   - a run whose brew command cannot be found is treated as an uninstall,
-#   - a sudo-like layer that carries the script text, brew.rb path included,
-#     never decides the brew command (only the Ruby process does).
+#   - a sudo-like layer between brew and the script never decides the brew
+#     command (only the Ruby process does),
+#   - the cask hands both scripts to `/bin/sh -s` on standard input, so the
+#     command Homebrew prints when one fails holds no script text.
 #
 # Not covered here: the real sudo prompt and the real systemextensionsctl,
-# launchctl and pfctl. Those need a real `brew uninstall` on a Mac.
+# launchctl, pfctl, open and PlistBuddy. Those need a real `brew uninstall`
+# on a Mac.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -232,6 +235,21 @@ setup no-anchor
 rm "$SYS/etc/pf.anchors/puresnitch"
 expect_status 0 "uninstall works when the anchor file was never created" run_as_brew uninstall "$SYS/teardown.sh"
 [[ ! -e "$SYS/etc/pf.anchors/puresnitch" ]] && pass "no anchor file is created" || fail "no anchor file is created"
+
+# What Homebrew prints on a failure is the command it ran: the executable and
+# args, never the input. Read both script directives the way Homebrew does and
+# check the script text is only in the input.
+if ruby -e '
+  src = File.read(ARGV[0])
+  blocks = src.scan(/executable: "([^"]+)",\n\s*args:\s*(\[[^\]]*\]),\n\s*input:\s*<<~SH,/)
+  exit 1 unless blocks.size == 2
+  blocks.each { |exe, args| exit 1 unless exe == "/bin/sh" && eval(args) == ["-s"] }
+  exit 1 if src.include?("args:       [\"-c\"")
+' "$CASK"; then
+  pass "both scripts reach /bin/sh -s on standard input, so a failure prints no script text"
+else
+  fail "both scripts reach /bin/sh -s on standard input, so a failure prints no script text"
+fi
 
 if (( failures > 0 )); then
   printf '\n%d check(s) failed.\n' "$failures"
