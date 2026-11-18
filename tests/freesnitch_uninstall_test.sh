@@ -63,6 +63,7 @@ echo "systemextensionsctl \$*" >> "$SYS/calls"
 [ -f "$SYS/sysext-fails" ] && exit 1
 echo "1 extension(s)"
 [ -f "$SYS/sysext-present" ] && echo "*	*	BHAF4L4726	io.isaaclins.freesnitch.netext (1.1.0/34)	FreeSnitch	[activated enabled]"
+[ -f "$SYS/sysext-validating" ] && echo "*	*	BHAF4L4726	io.isaaclins.freesnitch.netext (1.1.0/34)	FreeSnitch	[validating by category]"
 [ -f "$SYS/sysext-stopped" ] && echo "		BHAF4L4726	io.isaaclins.freesnitch.netext (1.1.0/34)	FreeSnitch	[terminated waiting to uninstall on reboot]"
 exit 0
 EOF
@@ -179,6 +180,10 @@ setup app-too-old
 touch "$SYS/sysext-present"
 expect_status 1 "uninstall refuses for a FreeSnitch that cannot be asked" run_as_brew uninstall "$SYS/guard.sh"
 grep -q "^open" "$SYS/calls" && fail "an older FreeSnitch was started" || pass "an older FreeSnitch is not started"
+
+setup sysext-validating
+touch "$SYS/sysext-validating"
+expect_status 1 "an extension in any other state still holds the uninstall up" run_as_brew uninstall "$SYS/guard.sh"
 
 setup sysext-stopped
 touch "$SYS/sysext-stopped" "$SYS/app-new"

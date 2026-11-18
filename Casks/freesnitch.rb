@@ -69,12 +69,12 @@ cask "freesnitch" do
                 # is on, and removing the app leaves the extension behind. Once
                 # removed, macOS lists it as "terminated waiting to uninstall on
                 # reboot" until the next restart. It no longer runs and filters
-                # nothing then, so only an "[activated" entry still counts. A
-                # listing that fails is not proof that it is gone.
+                # nothing then, so every other entry, known state or not, still
+                # counts. A listing that fails is not proof that it is gone.
                 extension_active() {
                   listing=$(/usr/bin/systemextensionsctl list 2>/dev/null) || return 2
                   echo "$listing" | /usr/bin/grep -F "io.isaaclins.freesnitch.netext" |
-                    /usr/bin/grep -F -q "[activated"
+                    /usr/bin/grep -F -v "waiting to uninstall on reboot" | /usr/bin/grep -q .
                 }
                 check() {
                   extension_active
