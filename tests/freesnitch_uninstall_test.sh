@@ -7,18 +7,24 @@
 # It checks that:
 #   - `brew upgrade`, `brew reinstall` and `brew install` skip both scripts,
 #     also with a global flag before the command (`brew --debug upgrade`),
-#   - `brew uninstall` refuses while the network extension is still listed,
-#     and also when the listing itself fails,
+#   - `brew uninstall` quits a running FreeSnitch, then asks FreeSnitch to
+#     remove a still active network extension and goes on once it is gone; it refuses with one short line
+#     when that did not work, when the app is too old to be asked, and when the
+#     listing itself fails; an extension macOS already stopped ("terminated
+#     waiting to uninstall on reboot") does not hold it up,
 #   - `brew uninstall` stops the helper, empties the anchor file without
 #     deleting it, flushes the anchor and removes Insights,
 #   - it refuses while the helper still runs from the bundle, when the anchor
 #     is a symlink, and when pfctl fails,
-#   - a run whose brew command cannot be found is treated as an uninstall,
-#   - a sudo-like layer that carries the script text, brew.rb path included,
-#     never decides the brew command (only the Ruby process does).
+#   - a run whose brew command cannot be found refuses and touches nothing,
+#   - a sudo-like layer between brew and the script never decides the brew
+#     command (only the Ruby process does),
+#   - the cask hands both scripts to `/bin/sh -s` on standard input, so the
+#     command Homebrew prints when one fails holds no script text.
 #
 # Not covered here: the real sudo prompt and the real systemextensionsctl,
-# launchctl and pfctl. Those need a real `brew uninstall` on a Mac.
+# launchctl, pfctl, open, pkill and PlistBuddy. Those need a real `brew uninstall`
+# on a Mac.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -33,7 +39,7 @@ fail() { printf 'FAIL %s\n' "$1"; failures=$((failures + 1)); }
 # Pull the two heredocs out of the cask, in order: early_script, then script.
 extract() {
   awk -v want="$1" '
-    /<<~SH\],$/ { n++; inside = (n == want); next }
+    /<<~SH,$/ { n++; inside = (n == want); next }
     inside && /^ *SH$/ { inside = 0; next }
     inside { print }
   ' "$CASK" | sed -E 's/^ {16}//'
@@ -60,6 +66,41 @@ echo "systemextensionsctl \$*" >> "$SYS/calls"
 [ -f "$SYS/sysext-fails" ] && exit 1
 echo "1 extension(s)"
 [ -f "$SYS/sysext-present" ] && echo "*	*	BHAF4L4726	io.isaaclins.freesnitch.netext (1.1.0/34)	FreeSnitch	[activated enabled]"
+[ -f "$SYS/sysext-validating" ] && echo "*	*	BHAF4L4726	io.isaaclins.freesnitch.netext (1.1.0/34)	FreeSnitch	[validating by category]"
+[ -f "$SYS/sysext-disabled" ] && echo "		BHAF4L4726	io.isaaclins.freesnitch.netext (1.1.0/34)	FreeSnitch	[activated disabled]"
+[ -f "$SYS/sysext-stopped" ] && echo "		BHAF4L4726	io.isaaclins.freesnitch.netext (1.1.0/34)	FreeSnitch	[terminated waiting to uninstall on reboot]"
+exit 0
+EOF
+  # The app answers --remove-network-extension only from 1.2.0 on.
+  mkdir -p "$SYS/Applications/FreeSnitch.app/Contents"
+  echo "plist" > "$SYS/Applications/FreeSnitch.app/Contents/Info.plist"
+  cat > "$SYS/bin/PlistBuddy" <<EOF
+#!/bin/sh
+echo "PlistBuddy \$*" >> "$SYS/calls"
+[ -f "$SYS/app-new" ] && [ -f "\$3" ] && exit 0
+echo "Print: Entry Does Not Exist" >&2
+exit 1
+EOF
+  cat > "$SYS/bin/pkill" <<EOF
+#!/bin/sh
+echo "pkill \$*" >> "$SYS/calls"
+[ -f "$SYS/app-hangs" ] || rm -f "$SYS/app-running"
+exit 0
+EOF
+  cat > "$SYS/bin/pgrep" <<EOF
+#!/bin/sh
+[ -f "$SYS/app-running" ]
+EOF
+  cat > "$SYS/bin/sleep" <<EOF
+#!/bin/sh
+exit 0
+EOF
+  cat > "$SYS/bin/open" <<EOF
+#!/bin/sh
+echo "open \$*" >> "$SYS/calls"
+# The removal only counts when no other FreeSnitch was still running.
+[ -f "$SYS/app-running" ] && { echo "open while running" >> "$SYS/calls"; exit 0; }
+if [ -f "$SYS/app-removes" ]; then rm -f "$SYS/sysext-present"; touch "$SYS/sysext-stopped"; fi
 exit 0
 EOF
   cat > "$SYS/bin/launchctl" <<EOF
@@ -78,14 +119,21 @@ exit 0
 EOF
   chmod +x "$SYS/bin/"*
 
-  sed -e "s#/usr/bin/systemextensionsctl#$SYS/bin/systemextensionsctl#g" "$GUARD_SRC" > "$SYS/guard.sh"
+  sed -e "s#/usr/bin/systemextensionsctl#$SYS/bin/systemextensionsctl#g" \
+      -e "s#/usr/libexec/PlistBuddy#$SYS/bin/PlistBuddy#g" \
+      -e "s#/usr/bin/open#$SYS/bin/open#g" \
+      -e "s#/usr/bin/pkill#$SYS/bin/pkill#g" \
+      -e "s#/usr/bin/pgrep#$SYS/bin/pgrep#g" \
+      -e "s#/bin/sleep#$SYS/bin/sleep#g" \
+      -e "s|#{appdir}|$SYS/Applications|g" \
+      "$GUARD_SRC" > "$SYS/guard.sh"
   sed -e "s#/bin/launchctl#$SYS/bin/launchctl#g" \
       -e "s#/sbin/pfctl#$SYS/bin/pfctl#g" \
       -e "s#/etc/pf.anchors/puresnitch#$SYS/etc/pf.anchors/puresnitch#g" \
       -e "s#/Library/Application Support/FreeSnitch/Insights#$SYS/support/Insights#g" \
       "$TEARDOWN_SRC" > "$SYS/teardown.sh"
   # The fakes must be the only thing the scripts can reach.
-  if grep -Eq '(^|[^A-Za-z/])/(etc/pf|sbin/pfctl|bin/launchctl|usr/bin/systemextensionsctl|Library/Application)' \
+  if grep -Eq '(^|[^A-Za-z/])/(etc/pf|sbin/pfctl|bin/launchctl|usr/bin/systemextensionsctl|usr/bin/open|usr/bin/pkill|usr/bin/pgrep|bin/sleep|usr/libexec|Library/Application|Applications/FreeSnitch)' \
        <(sed -e "s#$SYS#FAKE#g" "$SYS/teardown.sh" "$SYS/guard.sh" | grep -v '^ *#' | grep -v 'echo "'); then
     echo "a real system path survived the rewrite"; exit 1
   fi
@@ -94,8 +142,8 @@ EOF
 # Run a script the way brew does. brew is a Ruby process whose command line is
 # `ruby ... /Library/Homebrew/brew.rb <command> ...`; a shell reached through a
 # link named "ruby" stands in for it. Between brew and the script sits a layer
-# that holds the whole script text, brew.rb path included, in its arguments,
-# the way `sudo -E -- /bin/sh -c <script>` does for the teardown.
+# like `sudo -E --`, and the script reaches `/bin/sh -s` on standard input, the
+# way the cask hands it over.
 run_as_brew() {
   local script="${@: -1}"
   # A long prefix keeps "brew.rb" far past column 80, where ps would cut a
@@ -105,7 +153,7 @@ run_as_brew() {
   ln -sf /bin/sh "$TMP/ruby-bin/ruby"
   printf '#!/bin/sh\n"$@"\nexit $?\n' > "$TMP/ruby-bin/sudo-layer"
   chmod +x "$TMP/ruby-bin/sudo-layer"
-  printf '#!/bin/sh\n"%s" /bin/sh -c "$(cat "$SCRIPT")"\nexit $?\n' "$TMP/ruby-bin/sudo-layer" > "$fake_brew"
+  printf '#!/bin/sh\n"%s" /bin/sh -s < "$SCRIPT"\nexit $?\n' "$TMP/ruby-bin/sudo-layer" > "$fake_brew"
   SCRIPT="$script" COLUMNS= "$TMP/ruby-bin/ruby" "$fake_brew" "${@:1:$#-1}" --cask freesnitch
 }
 
@@ -140,17 +188,68 @@ expect_status 0 "brew --debug upgrade still counts as an upgrade" run_as_brew --
 expect_status 1 "brew --verbose uninstall still counts as an uninstall" run_as_brew --verbose uninstall "$SYS/guard.sh"
 
 setup sysext-present
-touch "$SYS/sysext-present"
-expect_status 1 "uninstall refuses while the extension is registered" run_as_brew uninstall "$SYS/guard.sh"
+touch "$SYS/sysext-present" "$SYS/app-new" "$SYS/app-removes"
+expect_status 0 "uninstall has FreeSnitch remove an active extension, then goes on" run_as_brew uninstall "$SYS/guard.sh"
+grep -q "^open -n -W $SYS/Applications/FreeSnitch.app --args --remove-network-extension" "$SYS/calls" \
+  && pass "FreeSnitch is asked to remove its extension" || fail "FreeSnitch is asked to remove its extension"
+
+# A running FreeSnitch quits before the removal is asked for, so it cannot
+# undo it (#397).
+setup app-running
+touch "$SYS/sysext-present" "$SYS/app-new" "$SYS/app-removes" "$SYS/app-running"
+expect_status 0 "a running FreeSnitch is quit before the removal is asked for" run_as_brew uninstall "$SYS/guard.sh"
+if grep -q "^pkill -x FreeSnitch" "$SYS/calls" && ! grep -q "open while running" "$SYS/calls" \
+   && [[ "$(grep -n '^pkill' "$SYS/calls" | cut -d: -f1)" -lt "$(grep -n '^open' "$SYS/calls" | cut -d: -f1)" ]]; then
+  pass "the running copy is gone before the second one starts"
+else
+  fail "the running copy is gone before the second one starts"; cat "$SYS/calls"
+fi
+
+setup app-hangs
+touch "$SYS/sysext-present" "$SYS/app-new" "$SYS/app-removes" "$SYS/app-running" "$SYS/app-hangs"
+expect_status 1 "uninstall refuses when the running FreeSnitch does not quit" run_as_brew uninstall "$SYS/guard.sh"
+grep -q "^open" "$SYS/calls" && fail "removal was asked for with FreeSnitch still running" || pass "no removal is asked for while it still runs"
+
+setup app-could-not
+touch "$SYS/sysext-present" "$SYS/app-new"
+expect_status 1 "uninstall refuses when FreeSnitch could not remove the extension" run_as_brew uninstall "$SYS/guard.sh"
 grep -q "Settings > Uninstall" "$SYS/out" && pass "the refusal says what to do" || fail "the refusal says what to do"
+grep -q "systemextensionsctl\|replacing\|esac" "$SYS/out" && fail "the refusal prints script text" || pass "the refusal prints no script text"
+
+setup app-too-old
+touch "$SYS/sysext-present"
+expect_status 1 "uninstall refuses for a FreeSnitch that cannot be asked" run_as_brew uninstall "$SYS/guard.sh"
+grep -q "^open" "$SYS/calls" && fail "an older FreeSnitch was started" || pass "an older FreeSnitch is not started"
+
+setup sysext-validating
+touch "$SYS/sysext-validating"
+expect_status 1 "an extension in any other state still holds the uninstall up" run_as_brew uninstall "$SYS/guard.sh"
+
+setup sysext-disabled
+touch "$SYS/sysext-disabled" "$SYS/app-new"
+expect_status 0 "a disabled extension does not hold the uninstall up, as in the app" run_as_brew uninstall "$SYS/guard.sh"
+
+setup sysext-stopped
+touch "$SYS/sysext-stopped" "$SYS/app-new"
+expect_status 0 "an extension macOS already stopped does not hold the uninstall up" run_as_brew uninstall "$SYS/guard.sh"
+grep -q "^open" "$SYS/calls" && fail "FreeSnitch was started for a stopped extension" || pass "FreeSnitch is not started for a stopped extension"
 
 setup sysext-fails
 touch "$SYS/sysext-fails"
 expect_status 1 "uninstall refuses when the extension list cannot be read" run_as_brew uninstall "$SYS/guard.sh"
 
+# Not knowing the brew command must never tear anything down: an upgrade read
+# as an uninstall would remove the firewall. Both scripts refuse instead, also
+# with nothing left in the way of an uninstall.
 setup unknown-command
-touch "$SYS/sysext-present"
-expect_status 1 "an unknown brew command is treated as an uninstall" /bin/sh "$SYS/guard.sh"
+expect_status 1 "the extension check refuses when the brew command is unknown" /bin/sh "$SYS/guard.sh"
+grep -q "Could not tell" "$SYS/out" && pass "that refusal says why" || fail "that refusal says why"
+expect_status 1 "the teardown refuses when the brew command is unknown" /bin/sh "$SYS/teardown.sh"
+if [[ ! -s "$SYS/calls" ]] && anchor_untouched && [[ -e "$SYS/support/Insights/day.json" ]]; then
+  pass "an unknown brew command touches nothing"
+else
+  fail "an unknown brew command touches nothing"; cat "$SYS/calls"
+fi
 
 setup clean
 expect_status 0 "uninstall passes the extension check once it is gone" run_as_brew uninstall "$SYS/guard.sh"
@@ -186,6 +285,21 @@ setup no-anchor
 rm "$SYS/etc/pf.anchors/puresnitch"
 expect_status 0 "uninstall works when the anchor file was never created" run_as_brew uninstall "$SYS/teardown.sh"
 [[ ! -e "$SYS/etc/pf.anchors/puresnitch" ]] && pass "no anchor file is created" || fail "no anchor file is created"
+
+# What Homebrew prints on a failure is the command it ran: the executable and
+# args, never the input. Read both script directives the way Homebrew does and
+# check the script text is only in the input.
+if ruby -e '
+  src = File.read(ARGV[0])
+  blocks = src.scan(/executable: "([^"]+)",\n\s*args:\s*(\[[^\]]*\]),\n\s*input:\s*<<~SH,/)
+  exit 1 unless blocks.size == 2
+  blocks.each { |exe, args| exit 1 unless exe == "/bin/sh" && eval(args) == ["-s"] }
+  exit 1 if src.include?("args:       [\"-c\"")
+' "$CASK"; then
+  pass "both scripts reach /bin/sh -s on standard input, so a failure prints no script text"
+else
+  fail "both scripts reach /bin/sh -s on standard input, so a failure prints no script text"
+fi
 
 if (( failures > 0 )); then
   printf '\n%d check(s) failed.\n' "$failures"
