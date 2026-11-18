@@ -7,8 +7,8 @@
 # It checks that:
 #   - `brew upgrade`, `brew reinstall` and `brew install` skip both scripts,
 #     also with a global flag before the command (`brew --debug upgrade`),
-#   - `brew uninstall` asks FreeSnitch to remove a still active network
-#     extension and goes on once it is gone; it refuses with one short line
+#   - `brew uninstall` quits a running FreeSnitch, then asks FreeSnitch to
+#     remove a still active network extension and goes on once it is gone; it refuses with one short line
 #     when that did not work, when the app is too old to be asked, and when the
 #     listing itself fails; an extension macOS already stopped ("terminated
 #     waiting to uninstall on reboot") does not hold it up,
@@ -23,7 +23,7 @@
 #     command Homebrew prints when one fails holds no script text.
 #
 # Not covered here: the real sudo prompt and the real systemextensionsctl,
-# launchctl, pfctl, open and PlistBuddy. Those need a real `brew uninstall`
+# launchctl, pfctl, open, pkill and PlistBuddy. Those need a real `brew uninstall`
 # on a Mac.
 set -euo pipefail
 
@@ -80,9 +80,25 @@ echo "PlistBuddy \$*" >> "$SYS/calls"
 echo "Print: Entry Does Not Exist" >&2
 exit 1
 EOF
+  cat > "$SYS/bin/pkill" <<EOF
+#!/bin/sh
+echo "pkill \$*" >> "$SYS/calls"
+[ -f "$SYS/app-hangs" ] || rm -f "$SYS/app-running"
+exit 0
+EOF
+  cat > "$SYS/bin/pgrep" <<EOF
+#!/bin/sh
+[ -f "$SYS/app-running" ]
+EOF
+  cat > "$SYS/bin/sleep" <<EOF
+#!/bin/sh
+exit 0
+EOF
   cat > "$SYS/bin/open" <<EOF
 #!/bin/sh
 echo "open \$*" >> "$SYS/calls"
+# The removal only counts when no other FreeSnitch was still running.
+[ -f "$SYS/app-running" ] && { echo "open while running" >> "$SYS/calls"; exit 0; }
 if [ -f "$SYS/app-removes" ]; then rm -f "$SYS/sysext-present"; touch "$SYS/sysext-stopped"; fi
 exit 0
 EOF
@@ -105,6 +121,9 @@ EOF
   sed -e "s#/usr/bin/systemextensionsctl#$SYS/bin/systemextensionsctl#g" \
       -e "s#/usr/libexec/PlistBuddy#$SYS/bin/PlistBuddy#g" \
       -e "s#/usr/bin/open#$SYS/bin/open#g" \
+      -e "s#/usr/bin/pkill#$SYS/bin/pkill#g" \
+      -e "s#/usr/bin/pgrep#$SYS/bin/pgrep#g" \
+      -e "s#/bin/sleep#$SYS/bin/sleep#g" \
       -e "s|#{appdir}|$SYS/Applications|g" \
       "$GUARD_SRC" > "$SYS/guard.sh"
   sed -e "s#/bin/launchctl#$SYS/bin/launchctl#g" \
@@ -113,7 +132,7 @@ EOF
       -e "s#/Library/Application Support/FreeSnitch/Insights#$SYS/support/Insights#g" \
       "$TEARDOWN_SRC" > "$SYS/teardown.sh"
   # The fakes must be the only thing the scripts can reach.
-  if grep -Eq '(^|[^A-Za-z/])/(etc/pf|sbin/pfctl|bin/launchctl|usr/bin/systemextensionsctl|usr/bin/open|usr/libexec|Library/Application|Applications/FreeSnitch)' \
+  if grep -Eq '(^|[^A-Za-z/])/(etc/pf|sbin/pfctl|bin/launchctl|usr/bin/systemextensionsctl|usr/bin/open|usr/bin/pkill|usr/bin/pgrep|bin/sleep|usr/libexec|Library/Application|Applications/FreeSnitch)' \
        <(sed -e "s#$SYS#FAKE#g" "$SYS/teardown.sh" "$SYS/guard.sh" | grep -v '^ *#' | grep -v 'echo "'); then
     echo "a real system path survived the rewrite"; exit 1
   fi
@@ -172,6 +191,23 @@ touch "$SYS/sysext-present" "$SYS/app-new" "$SYS/app-removes"
 expect_status 0 "uninstall has FreeSnitch remove an active extension, then goes on" run_as_brew uninstall "$SYS/guard.sh"
 grep -q "^open -n -W $SYS/Applications/FreeSnitch.app --args --remove-network-extension" "$SYS/calls" \
   && pass "FreeSnitch is asked to remove its extension" || fail "FreeSnitch is asked to remove its extension"
+
+# A running FreeSnitch quits before the removal is asked for, so it cannot
+# undo it (#397).
+setup app-running
+touch "$SYS/sysext-present" "$SYS/app-new" "$SYS/app-removes" "$SYS/app-running"
+expect_status 0 "a running FreeSnitch is quit before the removal is asked for" run_as_brew uninstall "$SYS/guard.sh"
+if grep -q "^pkill -x FreeSnitch" "$SYS/calls" && ! grep -q "open while running" "$SYS/calls" \
+   && [[ "$(grep -n '^pkill' "$SYS/calls" | cut -d: -f1)" -lt "$(grep -n '^open' "$SYS/calls" | cut -d: -f1)" ]]; then
+  pass "the running copy is gone before the second one starts"
+else
+  fail "the running copy is gone before the second one starts"; cat "$SYS/calls"
+fi
+
+setup app-hangs
+touch "$SYS/sysext-present" "$SYS/app-new" "$SYS/app-removes" "$SYS/app-running" "$SYS/app-hangs"
+expect_status 1 "uninstall refuses when the running FreeSnitch does not quit" run_as_brew uninstall "$SYS/guard.sh"
+grep -q "^open" "$SYS/calls" && fail "removal was asked for with FreeSnitch still running" || pass "no removal is asked for while it still runs"
 
 setup app-could-not
 touch "$SYS/sysext-present" "$SYS/app-new"

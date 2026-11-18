@@ -101,6 +101,20 @@ cask "freesnitch" do
                 app="#{appdir}/FreeSnitch.app"
                 marker=FreeSnitchRemovesNetworkExtensionOnRequest
                 if /usr/libexec/PlistBuddy -c "Print :$marker" "$app/Contents/Info.plist" >/dev/null 2>&1; then
+                  # A FreeSnitch that is still running could have a rule save or
+                  # an extension activation in flight and undo the removal, so
+                  # it quits first. Homebrew's own quit step comes only after
+                  # this script. FreeSnitch fails open when it quits.
+                  /usr/bin/pkill -x FreeSnitch >/dev/null 2>&1
+                  waited=0
+                  while /usr/bin/pgrep -x FreeSnitch >/dev/null 2>&1; do
+                    if [ "$waited" -ge 20 ]; then
+                      echo "FreeSnitch is still running. Quit it from its menu bar icon, then run this again." >&2
+                      exit 1
+                    fi
+                    /bin/sleep 0.5
+                    waited=$((waited + 1))
+                  done
                   echo "Removing FreeSnitch's network filter. macOS may ask you to allow it."
                   /usr/bin/open -n -W "$app" --args --remove-network-extension
                   check
