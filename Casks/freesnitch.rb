@@ -26,8 +26,9 @@ cask "freesnitch" do
   # so the firewall keeps running and nothing is torn down (Homebrew still quits
   # the app for the swap and opens it again afterwards). Homebrew does not
   # tell an uninstall script which command it is part of, so each script reads
-  # the running `brew` command from its parent processes. If it cannot tell, it
-  # treats the run as an uninstall, which at worst refuses to remove the app.
+  # the running `brew` command from its parent processes. If it cannot tell,
+  # it refuses and changes nothing: guessing "uninstall" during an upgrade
+  # would tear the firewall down.
   uninstall early_script: {
               executable: "/bin/sh",
               args:       ["-s"],
@@ -38,10 +39,10 @@ cask "freesnitch" do
                   while [ "${pid:-0}" -gt 1 ]; do
                     # Only Homebrew's own Ruby process counts, never a sudo or
                     # sh in between.
-                    executable=$(/bin/ps -ww -o comm= -p "$pid") || return 1
+                    executable=$(/bin/ps -ww -o comm= -p "$pid") || return 2
                     case "${executable##*/}" in
                       ruby*)
-                        command=$(/bin/ps -ww -o args= -p "$pid") || return 1
+                        command=$(/bin/ps -ww -o args= -p "$pid") || return 2
                         case "$command" in
                           *"/Library/Homebrew/brew.rb "*)
                             # The first word after brew.rb that is not a flag
@@ -53,16 +54,23 @@ cask "freesnitch" do
                                 *) return 1 ;;
                               esac
                             done
-                            return 1
+                            return 2
                             ;;
                         esac
                         ;;
                     esac
                     pid=$(/bin/ps -o ppid= -p "$pid" | /usr/bin/tr -d " ")
                   done
-                  return 1
+                  return 2
                 }
-                replacing && exit 0
+                # 0: upgrade or reinstall, 1: uninstall, 2: cannot tell.
+                replacing
+                how=$?
+                [ "$how" -eq 0 ] && exit 0
+                if [ "$how" -ne 1 ]; then
+                  echo "Could not tell whether Homebrew is upgrading or removing FreeSnitch, so nothing was changed." >&2
+                  exit 1
+                fi
 
                 # Only FreeSnitch itself can remove its network extension:
                 # systemextensionsctl refuses while System Integrity Protection
@@ -112,10 +120,10 @@ cask "freesnitch" do
                   while [ "${pid:-0}" -gt 1 ]; do
                     # Only Homebrew's own Ruby process counts, never a sudo or
                     # sh in between.
-                    executable=$(/bin/ps -ww -o comm= -p "$pid") || return 1
+                    executable=$(/bin/ps -ww -o comm= -p "$pid") || return 2
                     case "${executable##*/}" in
                       ruby*)
-                        command=$(/bin/ps -ww -o args= -p "$pid") || return 1
+                        command=$(/bin/ps -ww -o args= -p "$pid") || return 2
                         case "$command" in
                           *"/Library/Homebrew/brew.rb "*)
                             # The first word after brew.rb that is not a flag
@@ -127,16 +135,23 @@ cask "freesnitch" do
                                 *) return 1 ;;
                               esac
                             done
-                            return 1
+                            return 2
                             ;;
                         esac
                         ;;
                     esac
                     pid=$(/bin/ps -o ppid= -p "$pid" | /usr/bin/tr -d " ")
                   done
-                  return 1
+                  return 2
                 }
-                replacing && exit 0
+                # 0: upgrade or reinstall, 1: uninstall, 2: cannot tell.
+                replacing
+                how=$?
+                [ "$how" -eq 0 ] && exit 0
+                if [ "$how" -ne 1 ]; then
+                  echo "Could not tell whether Homebrew is upgrading or removing FreeSnitch, so nothing was changed." >&2
+                  exit 1
+                fi
 
                 # Stop the privileged helper. It runs from inside the app
                 # bundle, so the bundle must not be removed underneath it.

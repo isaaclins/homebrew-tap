@@ -16,7 +16,7 @@
 #     deleting it, flushes the anchor and removes Insights,
 #   - it refuses while the helper still runs from the bundle, when the anchor
 #     is a symlink, and when pfctl fails,
-#   - a run whose brew command cannot be found is treated as an uninstall,
+#   - a run whose brew command cannot be found refuses and touches nothing,
 #   - a sudo-like layer between brew and the script never decides the brew
 #     command (only the Ruby process does),
 #   - the cask hands both scripts to `/bin/sh -s` on standard input, so the
@@ -197,9 +197,18 @@ setup sysext-fails
 touch "$SYS/sysext-fails"
 expect_status 1 "uninstall refuses when the extension list cannot be read" run_as_brew uninstall "$SYS/guard.sh"
 
+# Not knowing the brew command must never tear anything down: an upgrade read
+# as an uninstall would remove the firewall. Both scripts refuse instead, also
+# with nothing left in the way of an uninstall.
 setup unknown-command
-touch "$SYS/sysext-present"
-expect_status 1 "an unknown brew command is treated as an uninstall" /bin/sh "$SYS/guard.sh"
+expect_status 1 "the extension check refuses when the brew command is unknown" /bin/sh "$SYS/guard.sh"
+grep -q "Could not tell" "$SYS/out" && pass "that refusal says why" || fail "that refusal says why"
+expect_status 1 "the teardown refuses when the brew command is unknown" /bin/sh "$SYS/teardown.sh"
+if [[ ! -s "$SYS/calls" ]] && anchor_untouched && [[ -e "$SYS/support/Insights/day.json" ]]; then
+  pass "an unknown brew command touches nothing"
+else
+  fail "an unknown brew command touches nothing"; cat "$SYS/calls"
+fi
 
 setup clean
 expect_status 0 "uninstall passes the extension check once it is gone" run_as_brew uninstall "$SYS/guard.sh"
