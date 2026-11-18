@@ -18,6 +18,8 @@ cask "freesnitch" do
   app "FreeSnitch.app"
 
   # Both scripts mirror Scripts/uninstall_freesnitch.sh in the FreeSnitch repository.
+  # Their text goes to /bin/sh on standard input: when a script fails, Homebrew
+  # prints the command it ran, and that is then `/bin/sh -s`, not the script.
   #
   # Homebrew runs these uninstall steps on `brew upgrade` and `brew reinstall`
   # too. Those replace the app in place, the way FreeSnitch's own updater does,
@@ -28,14 +30,14 @@ cask "freesnitch" do
   # treats the run as an uninstall, which at worst refuses to remove the app.
   uninstall early_script: {
               executable: "/bin/sh",
-              args:       ["-c", <<~SH],
+              args:       ["-s"],
+              input:      <<~SH,
                 replacing() {
                   set -f
                   pid=$PPID
                   while [ "${pid:-0}" -gt 1 ]; do
-                    # Only Homebrew's own Ruby process counts. sudo and sh
-                    # carry this script's text, brew.rb path included, in
-                    # their arguments.
+                    # Only Homebrew's own Ruby process counts, never a sudo or
+                    # sh in between.
                     executable=$(/bin/ps -ww -o comm= -p "$pid") || return 1
                     case "${executable##*/}" in
                       ruby*)
@@ -62,34 +64,54 @@ cask "freesnitch" do
                 }
                 replacing && exit 0
 
-                # Only FreeSnitch itself can deactivate its network extension:
+                # Only FreeSnitch itself can remove its network extension:
                 # systemextensionsctl refuses while System Integrity Protection
-                # is on. Removing the app first would leave the extension
-                # behind. A listing that fails is not proof that it is gone.
-                if ! listing=$(/usr/bin/systemextensionsctl list 2>/dev/null); then
-                  echo "Cannot check whether FreeSnitch's network extension is still registered, so FreeSnitch was left in place." >&2
-                  exit 1
-                fi
-                case "$listing" in
-                  *io.isaaclins.freesnitch.netext*)
-                    echo "FreeSnitch's network extension is still registered with macOS, and only FreeSnitch can remove it." >&2
-                    echo "Open FreeSnitch, go to Settings > Uninstall, restart your Mac, then run this command again." >&2
+                # is on, and removing the app leaves the extension behind. Once
+                # removed, macOS lists it as "terminated waiting to uninstall on
+                # reboot" until the next restart. It no longer runs and filters
+                # nothing then, so only an "[activated" entry still counts. A
+                # listing that fails is not proof that it is gone.
+                extension_active() {
+                  listing=$(/usr/bin/systemextensionsctl list 2>/dev/null) || return 2
+                  echo "$listing" | /usr/bin/grep -F "io.isaaclins.freesnitch.netext" |
+                    /usr/bin/grep -F -q "[activated"
+                }
+                check() {
+                  extension_active
+                  state=$?
+                  if [ "$state" -eq 2 ]; then
+                    echo "Could not check FreeSnitch's network filter, so nothing was removed. Try again." >&2
                     exit 1
-                    ;;
-                esac
+                  fi
+                  [ "$state" -eq 1 ] && exit 0
+                }
+                check
+
+                # Ask FreeSnitch to remove it. It quits by itself when macOS
+                # has answered. Builds before 1.2.0 cannot do this and would
+                # open as usual, so they are not started.
+                app="#{appdir}/FreeSnitch.app"
+                marker=FreeSnitchRemovesNetworkExtensionOnRequest
+                if /usr/libexec/PlistBuddy -c "Print :$marker" "$app/Contents/Info.plist" >/dev/null 2>&1; then
+                  echo "Removing FreeSnitch's network filter. macOS may ask you to allow it."
+                  /usr/bin/open -n -W "$app" --args --remove-network-extension
+                  check
+                fi
+                echo "FreeSnitch's network filter is still on. Open FreeSnitch, choose Settings > Uninstall, then run this again." >&2
+                exit 1
               SH
             },
             quit:         "io.isaaclins.freesnitch",
             script:       {
               executable: "/bin/sh",
-              args:       ["-c", <<~SH],
+              args:       ["-s"],
+              input:      <<~SH,
                 replacing() {
                   set -f
                   pid=$PPID
                   while [ "${pid:-0}" -gt 1 ]; do
-                    # Only Homebrew's own Ruby process counts. sudo and sh
-                    # carry this script's text, brew.rb path included, in
-                    # their arguments.
+                    # Only Homebrew's own Ruby process counts, never a sudo or
+                    # sh in between.
                     executable=$(/bin/ps -ww -o comm= -p "$pid") || return 1
                     case "${executable##*/}" in
                       ruby*)
@@ -165,8 +187,8 @@ cask "freesnitch" do
   ]
 
   caveats <<~EOS
-    To uninstall, start in the app: FreeSnitch > Settings > Uninstall, then
-    restart your Mac. Only FreeSnitch can remove its network extension, so
-    `brew uninstall --cask freesnitch` refuses to run until that is done.
+    `brew uninstall --cask freesnitch` asks FreeSnitch to remove its network
+    filter first; macOS may ask you to allow that. You can also uninstall from
+    the app: FreeSnitch > Settings > Uninstall.
   EOS
 end
