@@ -1,6 +1,6 @@
 cask "freesnitch" do
-  version "1.2.0"
-  sha256 "3782978940e0c7a5bfbb1a893da307b0404643fb23d2618f827a4e1fbd9b2c32"
+  version "1.3.0"
+  sha256 "5130597b3b1f289c672e1168d522d79c7414b7fb53f5458f7c3bd0e4b8a09ad3"
 
   url "https://github.com/isaaclins/freesnitch/releases/download/v#{version}/FreeSnitch-#{version}.dmg"
   name "FreeSnitch"
